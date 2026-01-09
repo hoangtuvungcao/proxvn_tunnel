@@ -165,4 +165,13 @@ A: Bạn chạy Web Server (ví dụ `python -m http.server 8000`) trên máy ch
 A: Do phần mềm sử dụng kỹ thuật mạng (Tunneling) và nén file (UPX) nên đôi khi bị Windows Defender nhận diện nhầm. Hãy thêm folder vào Exclusion (vùng tin cậy).
 
 ---
+## ⚠️ LICENSE NOTICE
+
+This project is **FREE TO USE – NON-COMMERCIAL ONLY**.
+
+✅ You can download, run, and modify it  
+❌ You are NOT allowed to sell or monetize it in any form  
+
+Commercial use requires permission from the author.
+---
 © 2026 **ProxVN** • Developed by **TrongDev**
