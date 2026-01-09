@@ -1,0 +1,5 @@
+data
+data/*
+bin/*
+tunnel/*
+backend/cmd/server/
