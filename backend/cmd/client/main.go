@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -229,7 +230,8 @@ func (c *client) run() error {
 }
 
 func (c *client) connectControl() error {
-	conn, err := net.Dial("tcp", c.serverAddr)
+	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	conn, err := tls.Dial("tcp", c.serverAddr, tlsConfig)
 	if err != nil {
 		return err
 	}
@@ -492,7 +494,8 @@ func (c *client) handleProxy(id string) {
 	atomic.AddInt64(&c.activeSessions, 1)
 	atomic.AddUint64(&c.totalSessions, 1)
 
-	srvConn, err := net.Dial("tcp", c.serverAddr)
+	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	srvConn, err := tls.Dial("tcp", c.serverAddr, tlsConfig)
 	if err != nil {
 		log.Printf("[client] không connect server cho proxy: %v", err)
 		localConn.Close()

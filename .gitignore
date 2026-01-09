@@ -1,1 +1,18 @@
-backend/cmd/server/
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+bin/
+
+# Keys and Certs
+*.crt
+*.key
+*.pem
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/

@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -77,10 +80,10 @@ func (a *AuthService) ValidateToken(tokenString string) (*Claims, error) {
 }
 
 func (a *AuthService) GenerateAPIKey() string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 32)
-	for i := range b {
-		b[i] = charset[i%len(charset)]
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to time-based if crypto/rand fails (should not happen)
+		return fmt.Sprintf("proxvn_%d", time.Now().UnixNano())
 	}
-	return "proxvn_" + string(b)
+	return "proxvn_" + hex.EncodeToString(b)
 }

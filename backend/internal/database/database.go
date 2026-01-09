@@ -322,16 +322,26 @@ func (d *Database) GetAllTunnels() ([]*models.Tunnel, error) {
 	return tunnels, rows.Err()
 }
 
-func (d *Database) UpdateTunnel(tunnelID, name, localHost string, localPort int) error {
+func (d *Database) UpdateTunnel(tunnelID, userID, name, localHost string, localPort int) error {
 	query := `
 		UPDATE tunnels 
-		SET name = COALESCE(NULLIF($2, ''), name),
-		    local_host = COALESCE(NULLIF($3, ''), local_host),
-		    local_port = CASE WHEN $4 > 0 THEN $4 ELSE local_port END
-		WHERE id = $1
+		SET name = COALESCE(NULLIF($3, ''), name),
+		    local_host = COALESCE(NULLIF($4, ''), local_host),
+		    local_port = CASE WHEN $5 > 0 THEN $5 ELSE local_port END
+		WHERE id = $1 AND user_id = $2
 	`
-	_, err := d.db.Exec(query, tunnelID, name, localHost, localPort)
-	return err
+	result, err := d.db.Exec(query, tunnelID, userID, name, localHost, localPort)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("tunnel not found or access denied")
+	}
+	return nil
 }
 
 func (d *Database) UpdateTunnelStatus(tunnelID string, status string) error {
@@ -349,10 +359,20 @@ func (d *Database) UpdateTunnelLastSeen(tunnelID string) error {
 	return err
 }
 
-func (d *Database) DeleteTunnel(tunnelID string) error {
-	query := `DELETE FROM tunnels WHERE id = $1`
-	_, err := d.db.Exec(query, tunnelID)
-	return err
+func (d *Database) DeleteTunnel(tunnelID, userID string) error {
+	query := `DELETE FROM tunnels WHERE id = $1 AND user_id = $2`
+	result, err := d.db.Exec(query, tunnelID, userID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("tunnel not found or access denied")
+	}
+	return nil
 }
 
 func (d *Database) IsPortAvailable(port int) bool {

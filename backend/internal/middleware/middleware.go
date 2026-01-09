@@ -4,25 +4,36 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"proxvn/backend/internal/auth"
+	"proxvn/backend/internal/database"
 	"proxvn/backend/internal/models"
 )
 
 func AuthMiddleware(authService *auth.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
+		tokenString := ""
+		if authHeader != "" {
+			tokenString = strings.TrimPrefix(authHeader, "Bearer ")
+		}
+		
+		if tokenString == "" {
+			tokenString = c.Query("token")
+		}
+
+		if tokenString == "" {
 			c.JSON(http.StatusUnauthorized, models.APIResponse{
 				Success: false,
-				Error:   "Authorization header required",
+				Error:   "Authorization required",
 			})
 			c.Abort()
 			return
 		}
 
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 		claims, err := authService.ValidateToken(tokenString)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, models.APIResponse{
@@ -40,7 +51,7 @@ func AuthMiddleware(authService *auth.AuthService) gin.HandlerFunc {
 	}
 }
 
-func APIKeyMiddleware(db interface{}) gin.HandlerFunc {
+func APIKeyMiddleware(db *database.Database) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		apiKey := c.GetHeader("X-API-Key")
 		if apiKey == "" {
@@ -52,9 +63,8 @@ func APIKeyMiddleware(db interface{}) gin.HandlerFunc {
 			return
 		}
 
-		// TODO: Implement database lookup for API key
-		// For now, just check if it starts with "proxvn_"
-		if !strings.HasPrefix(apiKey, "proxvn_") {
+		user, err := db.GetUserByAPIKey(apiKey)
+		if err != nil {
 			c.JSON(http.StatusUnauthorized, models.APIResponse{
 				Success: false,
 				Error:   "Invalid API key",
@@ -63,6 +73,9 @@ func APIKeyMiddleware(db interface{}) gin.HandlerFunc {
 			return
 		}
 
+		c.Set("user_id", user.ID.String())
+		c.Set("username", user.Username)
+		c.Set("role", user.Role)
 		c.Set("api_key", apiKey)
 		c.Next()
 	}
@@ -85,7 +98,13 @@ func AdminMiddleware() gin.HandlerFunc {
 
 func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		origin := c.Request.Header.Get("Origin")
+		if origin != "" {
+			c.Header("Access-Control-Allow-Origin", origin)
+		} else {
+			c.Header("Access-Control-Allow-Origin", "*")
+		}
+		
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, X-API-Key")
 		c.Header("Access-Control-Allow-Credentials", "true")
@@ -99,9 +118,62 @@ func CORSMiddleware() gin.HandlerFunc {
 	}
 }
 
+// Simple in-memory rate limiter
+type rateLimiter struct {
+	visitors map[string]*visitor
+	mu       sync.Mutex
+}
+
+type visitor struct {
+	lastSeen time.Time
+	tokens   float64
+}
+
+var limiter = &rateLimiter{
+	visitors: make(map[string]*visitor),
+}
+
+func (rl *rateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	v, exists := rl.visitors[ip]
+	if !exists {
+		rl.visitors[ip] = &visitor{
+			lastSeen: time.Now(),
+			tokens:   10, // Burst size
+		}
+		return true
+	}
+
+	now := time.Now()
+	elapsed := now.Sub(v.lastSeen).Seconds()
+	v.lastSeen = now
+
+	// Replenish 1 token per second
+	v.tokens += elapsed
+	if v.tokens > 10 {
+		v.tokens = 10
+	}
+
+	if v.tokens >= 1 {
+		v.tokens--
+		return true
+	}
+
+	return false
+}
+
 func RateLimitMiddleware() gin.HandlerFunc {
-	// TODO: Implement proper rate limiting
 	return func(c *gin.Context) {
+		if !limiter.allow(c.ClientIP()) {
+			c.JSON(http.StatusTooManyRequests, models.APIResponse{
+				Success: false,
+				Error:   "Too many requests",
+			})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }

@@ -85,6 +85,22 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
+	// Validate input
+	if len(req.Password) < 6 {
+		c.JSON(http.StatusBadRequest, models.APIResponse{
+			Success: false,
+			Error:   "Password must be at least 6 characters",
+		})
+		return
+	}
+	if len(req.Username) < 3 {
+		c.JSON(http.StatusBadRequest, models.APIResponse{
+			Success: false,
+			Error:   "Username must be at least 3 characters",
+		})
+		return
+	}
+
 	// Hash password
 	hashedPassword, err := h.authService.HashPassword(req.Password)
 	if err != nil {
@@ -231,10 +247,11 @@ func (h *Handler) UpdateTunnel(c *gin.Context) {
 		return
 	}
 
-	if err := h.db.UpdateTunnel(tunnelID, req.Name, req.LocalHost, req.LocalPort); err != nil {
+	userID, _ := c.Get("user_id")
+	if err := h.db.UpdateTunnel(tunnelID, userID.(string), req.Name, req.LocalHost, req.LocalPort); err != nil {
 		c.JSON(http.StatusInternalServerError, models.APIResponse{
 			Success: false,
-			Error:   "Failed to update tunnel",
+			Error:   err.Error(),
 		})
 		return
 	}
@@ -247,11 +264,12 @@ func (h *Handler) UpdateTunnel(c *gin.Context) {
 
 func (h *Handler) DeleteTunnel(c *gin.Context) {
 	tunnelID := c.Param("id")
+	userID, _ := c.Get("user_id")
 	
-	if err := h.db.DeleteTunnel(tunnelID); err != nil {
+	if err := h.db.DeleteTunnel(tunnelID, userID.(string)); err != nil {
 		c.JSON(http.StatusInternalServerError, models.APIResponse{
 			Success: false,
-			Error:   "Failed to delete tunnel",
+			Error:   err.Error(),
 		})
 		return
 	}
