@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=ProxVN Client
+Comment=Secure Tunnel Client
+Exec=./proxvn-linux-client
+Icon=./icon.png
+Terminal=true
+Categories=Network;Utility;
