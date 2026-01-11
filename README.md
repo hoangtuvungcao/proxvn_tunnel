@@ -1,7 +1,7 @@
 # ProxVN - Giải Pháp Tunnel Việt Nam Premium
 > **Phiên bản 4.0.0** - Developed by **TrongDev**
 
-ProxVN là công cụ **Tunneling** mạnh mẽ, miễn phí, giúp bạn đưa các dịch vụ trong mạng nội bộ (Localhost) ra Internet công cộng chỉ với một câu lệnh - **Giống như ngrok**.
+ProxVN là công cụ **Tunneling** mạnh mẽ, miễn phí, giúp bạn đưa các dịch vụ trong mạng nội bộ (Localhost) ra Internet công cộng chỉ với một câu lệnh .
 
 ## 🌐 Website & Tải Về
 
