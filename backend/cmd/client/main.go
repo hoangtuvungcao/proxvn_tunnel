@@ -53,7 +53,11 @@ type client struct {
 	remotePort int
 	publicHost string
 	protocol   string
-
+	subdomain  string // Subdomain assigned by server for HTTP mode
+	baseDomain string // Base domain assigned by server for HTTP mode
+	uiEnabled  bool
+	
+	// Control connection
 	control     net.Conn
 	enc         *jsonWriter
 	dec         *jsonReader
@@ -66,7 +70,6 @@ type client struct {
 	pingCh      chan time.Duration
 	pingSent    int64
 	pingMs      int64
-	uiEnabled   bool
 	exitFlag       uint32
 	activeSessions int64
 	totalSessions  uint64
@@ -74,7 +77,7 @@ type client struct {
 	udpMu       sync.Mutex
 	udpSessions map[string]*udpClientSession
 	udpConn     *net.UDPConn
-	udpReady    bool
+	udpReady   bool
 
 	udpCtrlMu        sync.Mutex
 	udpPingTicker    *time.Ticker
@@ -142,11 +145,67 @@ func (r *jsonReader) Decode(msg *tunnel.Message) error {
 }
 
 func main() {
-	serverAddr := flag.String("server", defaultServerAddr, "địa chỉ server (ip:port)")
-	hostFlag := flag.String("host", defaultLocalHost, "dịch tới host nội bộ (mặc định 127.0.0.1)")
-	portFlag := flag.Int("port", defaultLocalPort, "dịch tới port nội bộ (bị ghi đè nếu truyền đối số)")
-	clientID := flag.String("id", "", "định danh client (ví dụ: my-tunnel)")
-	protoFlag := flag.String("proto", "tcp", "giao thức tunnel (tcp hoặc udp)")
+	// Custom usage message with examples
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `
+╔════════════════════════════════════════════════════════════════════════════╗
+║                 ProxVN v%s - Client                                   ║
+║            Tunnel Localhost ra Internet - Miễn Phí 100%%                   ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+🌟 TÍNH NĂNG:
+  • HTTP Tunnel:  Nhận subdomain HTTPS tự động (https://abc.domain.com)
+  • TCP Tunnel:   Public bất kỳ service TCP nào (Web, SSH, RDP, Database...)
+  • UDP Tunnel:   Cho game server (Minecraft PE, CS:GO, Palworld...)
+  • TLS Security: Mã hóa end-to-end cho tất cả kết nối
+  • Auto Reconnect: Tự động kết nối lại khi mất mạng
+
+📖 CÚ PHÁP:
+  proxvn [OPTIONS] [LOCAL_PORT]
+
+⚙️  CÁC THAM SỐ:
+`, tunnel.Version)
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+💡 VÍ DỤ SỬ DỤNG:
+
+▶ HTTP Tunnel - Nhận Subdomain HTTPS:
+  proxvn --proto http 80              # Share website port 80
+  proxvn --proto http 3000            # Share Node.js/React app
+  proxvn --proto http 443             # Tunnel local HTTPS site
+  → Kết quả: https://abc123.vutrungocrong.fun
+
+▶ TCP Tunnel - Nhận IP:Port:
+  proxvn 80                           # Public web server
+  proxvn 3389                         # Remote Desktop (RDP)
+  proxvn 22                           # SSH server
+  → Kết quả: 103.77.246.111:10000
+
+▶ UDP Tunnel - Game Server:
+  proxvn --proto udp 19132            # Minecraft Bedrock Edition
+  proxvn --proto udp 25565            # Minecraft Java (UDP mode)
+  proxvn --proto udp 7777             # Palworld server
+  → Kết quả: 103.77.246.111:10000
+
+▶ Kết nối tới VPS riêng:
+  proxvn --server YOUR_VPS_IP:8882 --proto http 80
+
+🔗 THÔNG TIN:
+  • Website:        https://vutrungocrong.fun
+  • Documentation:  https://github.com/hoangtuvungcao/proxvn_tunnel
+  • Issues:         https://github.com/hoangtuvungcao/proxvn_tunnel/issues
+
+© 2026 ProxVN - Developed by TrongDev
+Licensed under FREE TO USE - NON-COMMERCIAL ONLY
+
+`)
+	}
+	
+	serverAddr := flag.String("server", defaultServerAddr, "Địa chỉ tunnel server (mặc định: 103.77.246.111:8882)")
+	hostFlag := flag.String("host", defaultLocalHost, "Host nội bộ cần tunnel (mặc định: localhost)")
+	portFlag := flag.Int("port", defaultLocalPort, "Port nội bộ (bị ghi đè nếu truyền trực tiếp)")
+	clientID := flag.String("id", "", "Tên định danh client (tùy chọn, ví dụ: my-laptop)")
+	protoFlag := flag.String("proto", "tcp", "Giao thức: tcp, http, udp")
 	flag.Parse()
 
 	log.SetOutput(os.Stderr)
@@ -190,7 +249,7 @@ func main() {
 	}
 
 	proto := strings.ToLower(strings.TrimSpace(*protoFlag))
-	if proto != "udp" {
+	if proto != "udp" && proto != "http" {
 		proto = "tcp"
 	}
 
@@ -296,19 +355,38 @@ func (c *client) connectControl() error {
 		return fmt.Errorf("đăng ký thất bại: %+v", resp)
 	}
 	if strings.TrimSpace(resp.Key) != "" {
-		c.key = strings.TrimSpace(resp.Key)
+			c.key = strings.TrimSpace(resp.Key)
 	}
 	c.remotePort = resp.RemotePort
 	if strings.TrimSpace(resp.Protocol) != "" {
 		c.protocol = strings.ToLower(strings.TrimSpace(resp.Protocol))
 	}
+	
+	// For HTTP mode, server assigns a subdomain
+	if c.protocol == "http" && resp.Subdomain != "" {
+		c.subdomain = resp.Subdomain
+		// Also store base domain if provided
+		if resp.BaseDomain != "" {
+			c.baseDomain = resp.BaseDomain
+		}
+	}
+	
 	hostPart := c.serverAddr
 	if host, _, err := net.SplitHostPort(c.serverAddr); err == nil {
 		hostPart = host
 	}
 	c.publicHost = net.JoinHostPort(hostPart, strconv.Itoa(c.remotePort))
 	c.setUDPCtrlStatus("n/a")
-	log.Printf("[client] đăng ký thành công, public port %d", c.remotePort)
+	
+	// Log success based on protocol
+	if c.protocol == "http" {
+		log.Printf("[client] ✅ HTTP Tunnel Active")
+		log.Printf("[client] 🌐 Public URL: https://%s.vutrungocrong.fun", c.subdomain)
+		log.Printf("[client] 📍 Forwarding to: %s", c.localAddr)
+	} else {
+		log.Printf("[client] đăng ký thành công, public port %d", c.remotePort)
+	}
+	
 	if c.protocol == "udp" {
 		c.setUDPCtrlStatus("offline")
 		if err := c.setupUDPChannel(); err != nil {
@@ -345,6 +423,9 @@ func (c *client) receiveLoop() error {
 			_ = c.enc.Encode(tunnel.Message{Type: "pong"})
 		case "pong":
 			c.recordPingReply()
+		case "http_request":
+			// Handle HTTP request
+			go c.handleHTTPRequest(msg)
 		case "error":
 			log.Printf("[client] server báo lỗi: %s", msg.Error)
 		default:
@@ -1362,7 +1443,17 @@ func (c *client) renderFrame(stats trafficStats, ping time.Duration) {
 		bold + brightCyan + "╠══════════════════════════════════════════════════════",
 		statusLine(),
 		makeRow("🔗", "Local", c.localAddr, cyan),
-		makeRow("🌐", "Public", nonEmpty(c.publicHost, "pending..."), brightGreen + bold),
+		func() string {
+			displayHost := nonEmpty(c.publicHost, "pending...")
+			if c.protocol == "http" && c.subdomain != "" {
+				domain := c.baseDomain
+				if domain == "" {
+					domain = "vutrungocrong.fun" // Fallback default
+				}
+				displayHost = fmt.Sprintf("https://%s.%s", c.subdomain, domain)
+			}
+			return makeRow("🌐", "Public", displayHost, brightGreen + bold)
+		}(),
 		makeRow("📡", "Protocol", strings.ToUpper(nonEmpty(c.protocol, "tcp")), magenta),
 		bold + brightCyan + "╠══════════════════════════════════════════════════════",
 		func() string {

@@ -21,6 +21,8 @@ type ServerConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
+	HTTPDomain   string // Base domain for HTTP tunneling (e.g., "vutrungocrong.fun")
+	HTTPPort     int    // Port for HTTP proxy (default 443)
 }
 
 type DatabaseConfig struct {
@@ -54,6 +56,8 @@ func Load() (*Config, error) {
 			ReadTimeout:    getEnvDuration("READ_TIMEOUT", 30*time.Second),
 			WriteTimeout:   getEnvDuration("WRITE_TIMEOUT", 30*time.Second),
 			IdleTimeout:    getEnvDuration("IDLE_TIMEOUT", 60*time.Second),
+			HTTPDomain:     getEnv("HTTP_DOMAIN", ""), // Leave empty for IP:port fallback
+			HTTPPort:       getEnvInt("HTTP_PORT", 443),
 		},
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),

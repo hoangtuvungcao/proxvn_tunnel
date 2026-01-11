@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 	"proxvn/backend/internal/auth"
 	"proxvn/backend/internal/config"
 	"proxvn/backend/internal/database"
+	httpproxy "proxvn/backend/internal/http"
 	"proxvn/backend/internal/middleware"
 	"proxvn/backend/internal/tunnel"
 )
@@ -65,9 +67,13 @@ type server struct {
 	httpServer  *http.Server
 	proxyWaiting map[string]chan net.Conn
 	proxyMu      sync.Mutex
+	httpProxy    *httpproxy.HTTPProxyServer
+	httpRequests map[string]chan *httpproxy.HTTPResponse
+	httpReqMu    sync.Mutex
 }
 
 type clientSession struct {
+	server     *server  // Reference to parent server for HTTP response handling
 	conn       net.Conn
 	enc        *jsonWriter
 	dec        *jsonReader
@@ -76,6 +82,7 @@ type clientSession struct {
 	target     string
 	protocol   string
 	publicPort int
+	subdomain  string // For HTTP tunneling
 	lastSeen   time.Time
 	closeOnce  sync.Once
 	done       chan struct{}
@@ -119,7 +126,110 @@ func (r *jsonReader) Decode(msg *tunnel.Message) error {
 }
 
 func main() {
-	portFlag := flag.Int("port", defaultListenPort, "server listen port")
+	// Custom usage message with setup guide
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `
+╔════════════════════════════════════════════════════════════════════════════╗
+║                 ProxVN v%s - Server                                   ║
+║          Tunnel Server - Hỗ trợ TCP, UDP và HTTP Tunneling                 ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+🌟 TÍNH NĂNG SERVER:
+  • TCP/UDP Tunneling:  Hỗ trợ tunnel protocols truyền thống
+  • HTTP Tunneling:     Cấp subdomain HTTPS tự động cho clients
+  • Web Dashboard:      Quản lý clients qua giao diện web
+  • Auto SSL:           Tự động load SSL cert từ nhiều nguồn
+  • Cross-Platform:     Windows & Linux server support
+
+📖 CÚ PHÁP:
+  svproxvn [OPTIONS]
+
+⚙️  CÁC THAM SỐ:
+`, tunnel.Version)
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+💡 CÁCH SỬ DỤNG:
+
+▶ Chạy server cơ bản (TCP/UDP only):
+  svproxvn
+  svproxvn -port 8881
+
+▶ Chạy server với HTTP Tunneling (cần SSL cert):
+  # Linux
+  export HTTP_DOMAIN="yourdomain.com"
+  ./svproxvn
+
+  # Windows
+  set HTTP_DOMAIN=yourdomain.com
+  svproxvn.exe
+
+🔧 CẤU HÌNH HTTP TUNNELING:
+
+1️⃣  Chuẩn bị Domain & SSL Certificate:
+  
+  Cách 1: Dùng Cloudflare Origin Certificate (Khuyến nghị)
+    • Vào Cloudflare Dashboard → SSL/TLS → Origin Server
+    • Tạo Origin Certificate
+    • Lưu file: wildcard.crt và wildcard.key
+    • Đặt 2 file vào cùng thư mục với svproxvn
+
+  Cách 2: Dùng Let's Encrypt
+    sudo apt install python3-certbot-dns-cloudflare
+    sudo certbot certonly --dns-cloudflare \
+      --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
+      -d '*.yourdomain.com' -d 'yourdomain.com'
+    
+    # Copy cert
+    sudo cp /etc/letsencrypt/live/yourdomain.com/fullchain.pem wildcard.crt
+    sudo cp /etc/letsencrypt/live/yourdomain.com/privkey.pem wildcard.key
+
+2️⃣  Cấu hình DNS trên Cloudflare:
+  
+  Tạo 2 bản ghi DNS:
+  ┌──────┬──────┬─────────────────┬──────────────┐
+  │ Type │ Name │ Content         │ Proxy Status │
+  ├──────┼──────┼─────────────────┼──────────────┤
+  │ A    │ @    │ YOUR_VPS_IP     │ 🟠 Proxied  │
+  │ CNAME│ *    │ yourdomain.com  │ 🟠 Proxied  │
+  └──────┴──────┴─────────────────┴──────────────┘
+  
+  ⚠️  QUAN TRỌNG: Phải bật Cloudflare Proxy (đám mây màu cam)!
+
+3️⃣  Cấu hình SSL Mode:
+  
+  Cloudflare Dashboard → SSL/TLS → Overview
+  Chọn: Full (strict)
+
+4️⃣  Mở Firewall (nếu cần):
+  
+  # Linux (ufw)
+  sudo ufw allow 8881/tcp  # Dashboard
+  sudo ufw allow 8882/tcp  # Tunnel
+  sudo ufw allow 443/tcp   # HTTPS (HTTP Tunneling)
+  
+  # Windows: Mở Windows Firewall → Inbound Rules → New Rule
+
+🌐 TRUY CẬP DASHBOARD:
+  http://localhost:8881/dashboard/
+  http://YOUR_VPS_IP:8881/dashboard/
+
+📊 PORTS:
+  • Dashboard/API: 8881 (hoặc port bạn chọn)
+  • Tunnel:        8882 (Dashboard Port + 1)
+  • HTTPS Proxy:   443  (nếu bật HTTP Tunneling)
+
+🔗 THÔNG TIN:
+  • Website:        https://vutrungocrong.fun
+  • Documentation:  https://github.com/proxvn/docs
+  • Setup Guide:    DOMAIN_SETUP.md
+
+© 2026 ProxVN - Developed by TrongDev
+Licensed under FREE TO USE - NON-COMMERCIAL ONLY
+
+`)
+	}
+	
+	portFlag := flag.Int("port", defaultListenPort, "Port cho Dashboard & API (Tunnel port = Port + 1)")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -134,15 +244,19 @@ func main() {
 	}
 
 	s := &server{
-		listenPort:  *portFlag,
-		clients:     make(map[string]*clientSession),
-		publicPort:  publicPortStart,
-		udpSessions: make(map[string]*udpServerSession),
+		listenPort:   *portFlag,
+		clients:      make(map[string]*clientSession),
+		publicPort:   publicPortStart,
+		udpSessions:  make(map[string]*udpServerSession),
 		proxyWaiting: make(map[string]chan net.Conn),
+		httpRequests: make(map[string]chan *httpproxy.HTTPResponse),
 	}
 
 	// Start HTTP/API/Dashboard server
 	go s.startHTTPServer(cfg)
+
+	// Initialize HTTP proxy for HTTP tunneling (if SSL cert available)
+	go s.initHTTPProxy(cfg)
 
 	// Run tunnel server
 	if err := s.run(); err != nil {
@@ -198,11 +312,33 @@ func (s *server) startHTTPServer(cfg *config.Config) {
 	log.Printf("[http] Serving dashboard from: %s", dashboardDir)
 	router.Static("/dashboard", dashboardDir)
 
+	// Serve static files for Landing Page
+	landingDir := filepath.Join(dashboardDir, "landing")
+	router.Static("/assets", landingDir) // Helper for assets if needed, but we use root
+	
+	// Serve Landing Page files directly at root to work with relative links
+	router.StaticFile("/", filepath.Join(landingDir, "index.html"))
+	router.StaticFile("/style.css", filepath.Join(landingDir, "style.css"))
+	router.StaticFile("/script.js", filepath.Join(landingDir, "script.js"))
+	
+	// Serve Downloads (Map virtual paths to actual binaries)
+	// We assume 'bin' is in CWD or parent
+	binDir := "bin"
+	if _, err := os.Stat("bin"); os.IsNotExist(err) {
+		binDir = "." // If running inside bin
+	}
+	
+	router.StaticFile("/downloads/proxvn-windows.zip", filepath.Join(binDir, "proxvn.exe")) // Map zip to exe for now or just generic
+	router.StaticFile("/downloads/proxvn.exe", filepath.Join(binDir, "proxvn.exe"))
+	router.StaticFile("/downloads/proxvn-linux-client", filepath.Join(binDir, "proxvn-linux-client"))
+	router.StaticFile("/downloads/proxvn-mac-intel", filepath.Join(binDir, "proxvn-mac-intel"))
+	router.StaticFile("/downloads/proxvn-mac-m1", filepath.Join(binDir, "proxvn-mac-m1"))
+	router.StaticFile("/downloads/proxvn-android", filepath.Join(binDir, "proxvn-android"))
+	router.StaticFile("/downloads/proxvn-linux-server", filepath.Join(binDir, "proxvn-linux-server"))
+	router.StaticFile("/downloads/svproxvn.exe", filepath.Join(binDir, "svproxvn.exe"))
+
 	// Explicitly redirect /dashboard/ to /dashboard/index.html if needed,
 	// or ensure main route hits it.
-	router.GET("/", func(c *gin.Context) {
-		c.Redirect(http.StatusMovedPermanently, "/dashboard/")
-	})
 
 	// Simple metrics endpoint (no DB required)
 	router.GET("/api/v1/metrics", func(c *gin.Context) {
@@ -543,6 +679,7 @@ func (s *server) handleConnection(conn net.Conn) {
 	if msg.Type == "register" {
 		// New client session
 		session := &clientSession{
+			server:   s,  // Set parent server reference for HTTP response handling
 			conn:     conn,
 			enc:      &jsonWriter{enc: tunnel.NewEncoder(conn)},
 			dec:      &jsonReader{dec: dec}, // Pass the decoder with existing buffer state
@@ -613,6 +750,18 @@ func (s *server) handleClient(session *clientSession, msg tunnel.Message) error 
 	// Register client
 	s.addClient(session)
 
+	// For HTTP protocol, assign subdomain
+	var baseDomain string
+	if session.protocol == "http" {
+		if err := s.registerHTTPClient(session); err != nil {
+			log.Printf("[server] Failed to register HTTP client: %v", err)
+			return fmt.Errorf("HTTP tunneling unavailable: %w", err)
+		}
+		if s.httpProxy != nil {
+			baseDomain = s.httpProxy.GetBaseDomain()
+		}
+	}
+
 	// Send registration response
 	resp := tunnel.Message{
 		Type:       "registered",
@@ -621,14 +770,21 @@ func (s *server) handleClient(session *clientSession, msg tunnel.Message) error 
 		RemotePort: publicPort,
 		Protocol:   session.protocol,
 		Version:    tunnel.Version,
+		Subdomain:  session.subdomain, // Include subdomain for HTTP mode
+		BaseDomain: baseDomain,
 	}
 
 	if err := session.enc.Encode(resp); err != nil {
 		return fmt.Errorf("failed to send registration response: %w", err)
 	}
 
-	log.Printf("[server] client %s registered, public port %d, protocol %s, target %s",
-		session.clientID, publicPort, session.protocol, session.target)
+	if session.protocol == "http" {
+		log.Printf("[server] client %s registered, HTTP mode, subdomain: %s.vutrungocrong.fun, target %s",
+			session.clientID, session.subdomain, session.target)
+	} else {
+		log.Printf("[server] client %s registered, public port %d, protocol %s, target %s",
+			session.clientID, publicPort, session.protocol, session.target)
+	}
 
 	// Start heartbeat checker
 	go s.heartbeatChecker(session)
@@ -672,6 +828,9 @@ func (s *server) controlLoop(session *clientSession) error {
 		case "proxy_error":
 			// Client failed to connect to local target
 			s.cancelProxyConnection(msg.ID)
+		case "http_response":
+			// Handle HTTP response from client
+			go s.handleHTTPResponse(msg)
 		default:
 			log.Printf("[server] unknown message type: %s", msg.Type)
 		}
@@ -1053,6 +1212,8 @@ func (s *server) removeClient(clientID string) {
 	s.clientsMu.Unlock()
 
 	if session != nil {
+		// Unregister from HTTP proxy if applicable
+		s.unregisterHTTPClient(session)
 		session.Close()
 	}
 }

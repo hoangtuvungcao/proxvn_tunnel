@@ -7,7 +7,7 @@ import (
 	"io"
 )
 
-const Version = "1.2.0"
+const Version = "4.0.0"
 
 // Message is the control-plane payload exchanged between tunnel peers.
 type Message struct {
@@ -22,6 +22,15 @@ type Message struct {
 	Protocol   string `json:"protocol,omitempty"`
 	RemoteAddr string `json:"remote_addr,omitempty"`
 	Payload    string `json:"payload,omitempty"`
+	
+	// HTTP tunneling fields
+	Subdomain  string            `json:"subdomain,omitempty"`
+	Method     string            `json:"method,omitempty"`
+	Path       string            `json:"path,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Body       []byte            `json:"body,omitempty"`
+	StatusCode int               `json:"status_code,omitempty"`
+	BaseDomain string            `json:"base_domain,omitempty"`  // Base domain for HTTP (e.g. vutrungocrong.fun)
 }
 
 // NewEncoder returns a JSON encoder with HTML escaping disabled.
