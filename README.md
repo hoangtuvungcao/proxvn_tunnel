@@ -416,7 +416,7 @@ Nếu bạn muốn đóng góp vào dự án:
 ## 📞 Liên Hệ & Hỗ Trợ
 
 - **Email:** trong20843@gmail.com
-- **GitHub Issues:** [Report bugs](https://github.com/yourusername/proxvn/issues)
+- **GitHub Issues:** [Report bugs](https://github.com/hoangtuvungcao/proxvn_tunnel//issues)
 
 ---
 
