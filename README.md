@@ -1,11 +1,11 @@
 # ProxVN - Giải Pháp Tunnel Việt Nam Premium
 > **Phiên bản 4.0.0** - Developed by **TrongDev**
 
-ProxVN là công cụ **Tunneling** mạnh mẽ, miễn phí, giúp bạn đưa các dịch vụ trong mạng nội bộ (Localhost) ra Internet công cộng chỉ với một câu lệnh - **Giống như ngrok**.
+ProxVN là công cụ **Tunneling** mạnh mẽ, miễn phí, giúp bạn đưa các dịch vụ trong mạng nội bộ (Localhost) ra Internet công cộng chỉ với một câu lệnh.
 
 ## 🌐 Website & Tải Về
 
-**🔗 Truy cập:** [https://vutrungocrong.fun](https://vutrungocrong.fun)
+**🔗 Truy cập:** [https://1b9b90.vutrungocrong.fun](https://1b9b90.vutrungocrong.fun)
 
 - ⬇️ **Tải file thực thi** cho Windows, Linux, macOS, Android
 - 📖 **Hướng dẫn sử dụng** chi tiết từng bước
@@ -34,7 +34,7 @@ ProxVN là công cụ **Tunneling** mạnh mẽ, miễn phí, giúp bạn đưa 
 
 ### Cách Nhanh Nhất - Từ Website
 
-Truy cập **[vutrungocrong.fun](https://vutrungocrong.fun)** và tải file phù hợp với hệ điều hành của bạn:
+Truy cập **[1b9b90.vutrungocrong.fun](https://1b9b90.vutrungocrong.fun)** và tải file phù hợp với hệ điều hành của bạn:
 
 - **Windows:** `proxvn.exe` (Client) hoặc `svproxvn.exe` (Server)
 - **Linux:** `proxvn-linux-client` hoặc `proxvn-linux-server`
@@ -416,7 +416,7 @@ Nếu bạn muốn đóng góp vào dự án:
 ## 📞 Liên Hệ & Hỗ Trợ
 
 - **Email:** trong20843@gmail.com
-- **GitHub Issues:** [Report bugs](https://github.com/yourusername/proxvn/issues)
+- **GitHub Issues:** [Report bugs](https://github.com/hoangtuvungcao/proxvn_tunnel/issues)
 
 ---
 
