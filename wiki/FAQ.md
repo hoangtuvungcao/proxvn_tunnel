@@ -312,7 +312,7 @@ Best practice:
 **Có!** Dùng Termux:
 ```bash
 # In Termux
-wget https://vutrungocrong.fun/downloads/proxvn-android
+wget https://1b9b90.vutrungocrong.fun/downloads/proxvn-android
 chmod +x proxvn-android
 ./proxvn-android --proto http 8080
 ```
@@ -320,7 +320,7 @@ chmod +x proxvn-android
 ### Có thể tunnel từ Raspberry Pi không?
 **Có!** Dùng Linux client:
 ```bash
-wget https://vutrungocrong.fun/downloads/proxvn-linux-client
+wget https://1b9b90.vutrungocrong.fun/downloads/proxvn-linux-client
 chmod +x proxvn-linux-client
 ./proxvn-linux-client --proto http 8123  # Home Assistant
 ```
