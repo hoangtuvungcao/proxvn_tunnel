@@ -10,7 +10,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"encoding/base64"
 	"errors"
+
 	"flag"
 	"fmt"
 	"io"
@@ -25,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/time/rate"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"proxvn/backend/internal/api"
@@ -70,6 +73,17 @@ type server struct {
 	httpProxy    *httpproxy.HTTPProxyServer
 	httpRequests map[string]chan *httpproxy.HTTPResponse
 	httpReqMu    sync.Mutex
+	
+	// Rate limiting
+	rateLimiters   map[string]*rateLimiter
+	rateLimitersMu sync.Mutex
+}
+
+type rateLimiter struct {
+	registrations *rate.Limiter
+	httpRequests  *rate.Limiter
+	udpSessions   *rate.Limiter
+	lastSeen      time.Time
 }
 
 type clientSession struct {
@@ -90,13 +104,16 @@ type clientSession struct {
 	bytesUp    uint64
 	bytesDown  uint64
 	remoteIP   string
+	udpSecret  []byte // Key for UDP encryption
 }
 
 type udpServerSession struct {
 	id         string
 	clientKey  string
+	udpSecret  []byte // Key for UDP encryption
 	conn       *net.UDPConn
 	remoteAddr *net.UDPAddr
+	clientAddr *net.UDPAddr // Client's public UDP address
 	closeOnce  sync.Once
 	closed     chan struct{}
 	timer      *time.Timer
@@ -243,23 +260,27 @@ Licensed under FREE TO USE - NON-COMMERCIAL ONLY
 		}
 	}
 
-	s := &server{
+	srv := &server{
 		listenPort:   *portFlag,
 		clients:      make(map[string]*clientSession),
 		publicPort:   publicPortStart,
 		udpSessions:  make(map[string]*udpServerSession),
 		proxyWaiting: make(map[string]chan net.Conn),
 		httpRequests: make(map[string]chan *httpproxy.HTTPResponse),
+		rateLimiters: make(map[string]*rateLimiter),
 	}
+	
+	// Start rate limiter cleanup goroutine
+	go srv.cleanupRateLimiters()
 
 	// Start HTTP/API/Dashboard server
-	go s.startHTTPServer(cfg)
+	go srv.startHTTPServer(cfg)
 
 	// Initialize HTTP proxy for HTTP tunneling (if SSL cert available)
-	go s.initHTTPProxy(cfg)
+	go srv.initHTTPProxy(cfg)
 
 	// Run tunnel server
-	if err := s.run(); err != nil {
+	if err := srv.run(); err != nil {
 		log.Fatalf("[server] fatal error: %v", err)
 	}
 }
@@ -712,11 +733,10 @@ func (s *server) handleConnection(conn net.Conn) {
 }
 
 func (s *server) handleClient(session *clientSession, msg tunnel.Message) error {
-	// Message already read in handleConnection
-	// msg := tunnel.Message{}
-	// if err := session.dec.Decode(&msg); err != nil {
-	// 	return fmt.Errorf("failed to read registration: %w", err)
-	// }
+	// Check rate limit for registration
+	if !s.checkRegistrationRateLimit(session.remoteIP) {
+		return fmt.Errorf("rate limit exceeded for registration from %s", session.remoteIP)
+	}
 
 	if msg.Type != "register" {
 		return fmt.Errorf("expected register message, got: %s", msg.Type)
@@ -762,6 +782,15 @@ func (s *server) handleClient(session *clientSession, msg tunnel.Message) error 
 		}
 	}
 
+	// Generate UDP encryption key
+	udpSecret, err := tunnel.GenerateKey()
+	if err != nil {
+		log.Printf("[server] Failed to generate UDP key: %v", err)
+		// Fallback to plain text if key generation fails (should not happen)
+	} else {
+		session.udpSecret = udpSecret
+	}
+
 	// Send registration response
 	resp := tunnel.Message{
 		Type:       "registered",
@@ -773,6 +802,11 @@ func (s *server) handleClient(session *clientSession, msg tunnel.Message) error 
 		Subdomain:  session.subdomain, // Include subdomain for HTTP mode
 		BaseDomain: baseDomain,
 	}
+
+	if udpSecret != nil {
+		resp.UDPSecret = base64.StdEncoding.EncodeToString(udpSecret)
+	}
+
 
 	if err := session.enc.Encode(resp); err != nil {
 		return fmt.Errorf("failed to send registration response: %w", err)
@@ -992,6 +1026,12 @@ func (s *server) handleUDPOpen(session *clientSession, msg tunnel.Message) {
 	if session.protocol != "udp" {
 		return
 	}
+	
+	// Check rate limit for UDP session creation
+	if !s.checkUDPSessionRateLimit(session.remoteIP) {
+		log.Printf("[server] rate limit exceeded for UDP session creation from %s", session.remoteIP)
+		return
+	}
 
 	// Parse remote address
 	remoteAddr := strings.TrimSpace(msg.RemoteAddr)
@@ -1024,6 +1064,7 @@ func (s *server) handleUDPOpen(session *clientSession, msg tunnel.Message) {
 	udpSession := &udpServerSession{
 		id:         msg.ID,
 		clientKey:  session.key,
+		udpSecret:  session.udpSecret,
 		conn:       conn,
 		remoteAddr: addr,
 		closed:     make(chan struct{}),
@@ -1123,9 +1164,11 @@ func (s *server) handleUDPControlPacket(packet []byte, addr *net.UDPAddr) {
 		if !ok || id == "" {
 			return
 		}
+		
 		payload := make([]byte, len(packet)-next)
 		copy(payload, packet[next:])
-		s.handleUDPDataFromClient(key, id, payload)
+		
+		s.handleUDPDataFromClient(key, id, payload, addr) 
 	case udpMsgClose:
 		id, _, ok := decodeUDPField(packet, idx)
 		if !ok || id == "" {
@@ -1139,7 +1182,7 @@ func (s *server) handleUDPControlPacket(packet []byte, addr *net.UDPAddr) {
 	}
 }
 
-func (s *server) handleUDPDataFromClient(clientKey, sessionID string, payload []byte) {
+func (s *server) handleUDPDataFromClient(clientKey, sessionID string, payload []byte, clientAddr *net.UDPAddr) {
 	s.udpMu.Lock()
 	session := s.udpSessions[sessionID]
 	s.udpMu.Unlock()
@@ -1147,6 +1190,21 @@ func (s *server) handleUDPDataFromClient(clientKey, sessionID string, payload []
 	if session == nil || session.clientKey != clientKey {
 		log.Printf("[server] UDP data for unknown or mismatched session %s", sessionID)
 		return
+	}
+	
+	// Update client address for return traffic
+	if session.clientAddr == nil || session.clientAddr.String() != clientAddr.String() {
+		session.clientAddr = clientAddr
+	}
+
+	// Decrypt if secret is available
+	if session.udpSecret != nil {
+		decrypted, err := tunnel.DecryptUDP(session.udpSecret, payload)
+		if err != nil {
+			log.Printf("[server] UDP decryption failed for session %s: %v", sessionID, err)
+			return
+		}
+		payload = decrypted
 	}
 
 	if _, err := session.conn.Write(payload); err != nil {
@@ -1156,22 +1214,48 @@ func (s *server) handleUDPDataFromClient(clientKey, sessionID string, payload []
 }
 
 func (s *server) sendUDPData(clientKey, sessionID string, payload []byte) error {
-	return s.writeUDP(udpMsgData, clientKey, sessionID, payload)
+	s.udpMu.Lock()
+	session := s.udpSessions[sessionID]
+	s.udpMu.Unlock()
+	
+	if session == nil {
+		return errors.New("udp session not found")
+	}
+	
+	// Encrypt if secret is available
+	if session.udpSecret != nil {
+		encrypted, err := tunnel.EncryptUDP(session.udpSecret, payload)
+		if err != nil {
+			return fmt.Errorf("encryption failed: %w", err)
+		}
+		payload = encrypted
+	}
+	
+	// Must have client address to send back
+	if session.clientAddr == nil {
+		// Drop packet if we don't know where to send (Client hasn't sent data yet)
+		// logic: client must initiate conversation
+		return nil 
+	}
+
+	return s.writeUDP(udpMsgData, clientKey, sessionID, payload, session.clientAddr)
 }
 
 func (s *server) sendUDPResponse(addr *net.UDPAddr, msgType byte, key, id string, payload []byte) error {
-	buf := buildUDPMessage(msgType, key, id, payload)
-	_, err := s.udpServer.WriteToUDP(buf, addr)
-	return err
+	// Pings/Handshakes are not encrypted (for now, or use separate secret?)
+	// Handshake doesn't have secret yet.
+	// Ping payload is random bytes, less critical.
+	// Ideally encrypt pings too if key established.
+	return s.writeUDP(msgType, key, id, payload, addr)
 }
 
-func (s *server) writeUDP(msgType byte, key, id string, payload []byte) error {
+func (s *server) writeUDP(msgType byte, key, id string, payload []byte, addr *net.UDPAddr) error {
 	if s.udpServer == nil {
 		return errors.New("UDP server not available")
 	}
 
 	buf := buildUDPMessage(msgType, key, id, payload)
-	_, err := s.udpServer.Write(buf)
+	_, err := s.udpServer.WriteToUDP(buf, addr)
 	return err
 }
 

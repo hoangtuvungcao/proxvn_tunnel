@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
+
 	"fmt"
 	"io"
 	"log"
@@ -46,30 +48,32 @@ const (
 )
 
 type client struct {
-	serverAddr string
-	localAddr  string
-	key        string
-	clientID   string
-	remotePort int
-	publicHost string
-	protocol   string
-	subdomain  string // Subdomain assigned by server for HTTP mode
-	baseDomain string // Base domain assigned by server for HTTP mode
-	uiEnabled  bool
-	
+	serverAddr      string
+	localAddr       string
+	key             string
+	clientID        string
+	remotePort      int
+	publicHost      string
+	protocol        string
+	subdomain       string // Subdomain assigned by server for HTTP mode
+	baseDomain      string // Base domain assigned by server for HTTP mode
+	certFingerprint string // Optional: Server certificate fingerprint for pinning
+	insecure        bool   // Skip TLS verification (insecure, for dev/testing only)
+	uiEnabled       bool
+
 	// Control connection
-	control     net.Conn
-	enc         *jsonWriter
-	dec         *jsonReader
-	closeOnce   sync.Once
-	done        chan struct{}
-	trafficQuit chan struct{}
-	statusCh    chan trafficStats
-	bytesUp     uint64
-	bytesDown   uint64
-	pingCh      chan time.Duration
-	pingSent    int64
-	pingMs      int64
+	control        net.Conn
+	enc            *jsonWriter
+	dec            *jsonReader
+	closeOnce      sync.Once
+	done           chan struct{}
+	trafficQuit    chan struct{}
+	statusCh       chan trafficStats
+	bytesUp        uint64
+	bytesDown      uint64
+	pingCh         chan time.Duration
+	pingSent       int64
+	pingMs         int64
 	exitFlag       uint32
 	activeSessions int64
 	totalSessions  uint64
@@ -77,7 +81,7 @@ type client struct {
 	udpMu       sync.Mutex
 	udpSessions map[string]*udpClientSession
 	udpConn     *net.UDPConn
-	udpReady   bool
+	udpReady    bool
 
 	udpCtrlMu        sync.Mutex
 	udpPingTicker    *time.Ticker
@@ -91,6 +95,7 @@ type client struct {
 	lastServerData   time.Time
 	lastBackendData  time.Time
 	totalUDPSessions uint64
+	udpSecret        []byte // Key for UDP encryption
 }
 
 type trafficStats struct {
@@ -200,21 +205,24 @@ Licensed under FREE TO USE - NON-COMMERCIAL ONLY
 
 `)
 	}
-	
+
 	serverAddr := flag.String("server", defaultServerAddr, "Địa chỉ tunnel server (mặc định: 103.77.246.111:8882)")
 	hostFlag := flag.String("host", defaultLocalHost, "Host nội bộ cần tunnel (mặc định: localhost)")
 	portFlag := flag.Int("port", defaultLocalPort, "Port nội bộ (bị ghi đè nếu truyền trực tiếp)")
-	clientID := flag.String("id", "", "Tên định danh client (tùy chọn, ví dụ: my-laptop)")
-	protoFlag := flag.String("proto", "tcp", "Giao thức: tcp, http, udp")
+	id := flag.String("id", "", "Client ID (optional)")
+	proto := flag.String("proto", "tcp", "Protocol: tcp, udp, or http")
+	UI := flag.Bool("ui", true, "Enable TUI (disable with --ui=false)")
+	certPin := flag.String("cert-pin", "", "Optional: Server certificate SHA256 fingerprint for pinning (hex format)")
+	insecure := flag.Bool("insecure", false, "Skip TLS certificate verification (INSECURE - for dev/testing only)")
 	flag.Parse()
 
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags)
 
-	id := strings.TrimSpace(*clientID)
-	if id == "" {
+	clientID := strings.TrimSpace(*id)
+	if clientID == "" {
 		host, _ := os.Hostname()
-		id = fmt.Sprintf("client-%s", host)
+		clientID = fmt.Sprintf("client-%s", host)
 	}
 
 	localHost := strings.TrimSpace(*hostFlag)
@@ -248,21 +256,20 @@ Licensed under FREE TO USE - NON-COMMERCIAL ONLY
 		log.Fatalf("[client] port không hợp lệ: %d", localPort)
 	}
 
-	proto := strings.ToLower(strings.TrimSpace(*protoFlag))
-	if proto != "udp" && proto != "http" {
-		proto = "tcp"
+	protocol := strings.ToLower(strings.TrimSpace(*proto))
+	if protocol != "udp" && protocol != "http" {
+		protocol = "tcp"
 	}
 
 	cl := &client{
-		serverAddr: *serverAddr,
-		localAddr:  net.JoinHostPort(localHost, strconv.Itoa(localPort)),
-		clientID:   id,
-		protocol:   proto,
-		uiEnabled:  term.IsTerminal(int(os.Stdout.Fd())),
+		serverAddr:      *serverAddr,
+		localAddr:       net.JoinHostPort(localHost, strconv.Itoa(localPort)),
+		clientID:        clientID,
+		protocol:        protocol,
+		certFingerprint: strings.ToLower(strings.TrimSpace(*certPin)),
+		insecure:        *insecure,
+		uiEnabled:       *UI && term.IsTerminal(int(os.Stdout.Fd())),
 	}
-
-
-
 
 	if err := cl.run(); err != nil {
 		log.Fatalf("[client] lỗi: %v", err)
@@ -289,8 +296,22 @@ func (c *client) run() error {
 }
 
 func (c *client) connectControl() error {
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	// First try: Secure connection with certificate validation
+	tlsConfig := c.buildTLSConfig()
 	conn, err := tls.Dial("tcp", c.serverAddr, tlsConfig)
+
+	// If certificate error and not in pinning mode, retry with insecure
+	if err != nil && !c.insecure && c.certFingerprint == "" {
+		if isCertError(err) {
+			log.Printf("[client] ⚠️  Certificate verification failed, retrying in INSECURE mode...")
+			log.Printf("[client] ⚠️  This is normal for self-signed certificates in dev/test")
+
+			// Retry with InsecureSkipVerify
+			tlsConfig.InsecureSkipVerify = true
+			conn, err = tls.Dial("tcp", c.serverAddr, tlsConfig)
+		}
+	}
+
 	if err != nil {
 		return err
 	}
@@ -355,29 +376,37 @@ func (c *client) connectControl() error {
 		return fmt.Errorf("đăng ký thất bại: %+v", resp)
 	}
 	if strings.TrimSpace(resp.Key) != "" {
-			c.key = strings.TrimSpace(resp.Key)
+		c.key = strings.TrimSpace(resp.Key)
 	}
 	c.remotePort = resp.RemotePort
 	if strings.TrimSpace(resp.Protocol) != "" {
 		c.protocol = strings.ToLower(strings.TrimSpace(resp.Protocol))
 	}
-	
+
 	// For HTTP mode, server assigns a subdomain
 	if c.protocol == "http" && resp.Subdomain != "" {
 		c.subdomain = resp.Subdomain
-		// Also store base domain if provided
-		if resp.BaseDomain != "" {
-			c.baseDomain = resp.BaseDomain
+	}
+
+	// Handle UDP Encryption Key
+	if resp.UDPSecret != "" {
+		secret, err := base64.StdEncoding.DecodeString(resp.UDPSecret)
+		if err == nil && len(secret) == 32 {
+			c.udpSecret = secret
 		}
 	}
-	
+	// Also store base domain if provided
+	if resp.BaseDomain != "" {
+		c.baseDomain = resp.BaseDomain
+	}
+
 	hostPart := c.serverAddr
 	if host, _, err := net.SplitHostPort(c.serverAddr); err == nil {
 		hostPart = host
 	}
 	c.publicHost = net.JoinHostPort(hostPart, strconv.Itoa(c.remotePort))
 	c.setUDPCtrlStatus("n/a")
-	
+
 	// Log success based on protocol
 	if c.protocol == "http" {
 		log.Printf("[client] ✅ HTTP Tunnel Active")
@@ -386,7 +415,7 @@ func (c *client) connectControl() error {
 	} else {
 		log.Printf("[client] đăng ký thành công, public port %d", c.remotePort)
 	}
-	
+
 	if c.protocol == "udp" {
 		c.setUDPCtrlStatus("offline")
 		if err := c.setupUDPChannel(); err != nil {
@@ -575,8 +604,18 @@ func (c *client) handleProxy(id string) {
 	atomic.AddInt64(&c.activeSessions, 1)
 	atomic.AddUint64(&c.totalSessions, 1)
 
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	// First try: Secure connection
+	tlsConfig := c.buildTLSConfig()
 	srvConn, err := tls.Dial("tcp", c.serverAddr, tlsConfig)
+
+	// Auto-fallback for certificate errors
+	if err != nil && !c.insecure && c.certFingerprint == "" {
+		if isCertError(err) {
+			tlsConfig.InsecureSkipVerify = true
+			srvConn, err = tls.Dial("tcp", c.serverAddr, tlsConfig)
+		}
+	}
+
 	if err != nil {
 		log.Printf("[client] không connect server cho proxy: %v", err)
 		localConn.Close()
@@ -764,6 +803,19 @@ func (c *client) handleUDPDataPacket(id string, payload []byte) {
 	if len(payload) == 0 {
 		return
 	}
+
+	// Decrypt if secret is available
+	if c.udpSecret != nil {
+		decrypted, err := tunnel.DecryptUDP(c.udpSecret, payload)
+		if err != nil {
+			if debugUDP {
+				log.Printf("[client] giải mã UDP thất bại: %v", err)
+			}
+			return
+		}
+		payload = decrypted
+	}
+
 	sess := c.getUDPSession(id)
 	if sess == nil {
 		return
@@ -925,6 +977,17 @@ func (c *client) sendUDPData(id string, payload []byte) {
 	if len(payload) == 0 {
 		return
 	}
+
+	// Encrypt if secret is available
+	if c.udpSecret != nil {
+		encrypted, err := tunnel.EncryptUDP(c.udpSecret, payload)
+		if err != nil {
+			log.Printf("[client] mã hóa UDP lỗi: %v", err)
+			return
+		}
+		payload = encrypted
+	}
+
 	if err := c.writeUDP(udpMsgData, id, payload); err != nil {
 		log.Printf("[client] gửi udp_data lỗi: %v", err)
 		return
@@ -1243,8 +1306,6 @@ func (c *client) closeControl() {
 	}
 }
 
-
-
 func normalizedArgs(input []string) []string {
 	filtered := make([]string, 0, len(input))
 	for _, arg := range input {
@@ -1387,21 +1448,21 @@ func formatPingDisplay(d time.Duration) (string, string) {
 
 func (c *client) renderFrame(stats trafficStats, ping time.Duration) {
 	activeSessions, totalSessions := c.getSessionStats()
-	
+
 	// ANSI colors
 	const (
-		reset = "\033[0m"
-		bold = "\033[1m"
-		cyan = "\033[36m"
-		green = "\033[32m"
-		yellow = "\033[33m"
-		red = "\033[31m"
-		magenta = "\033[35m"
-		blue = "\033[34m"
-		brightCyan = "\033[96m"
+		reset       = "\033[0m"
+		bold        = "\033[1m"
+		cyan        = "\033[36m"
+		green       = "\033[32m"
+		yellow      = "\033[33m"
+		red         = "\033[31m"
+		magenta     = "\033[35m"
+		blue        = "\033[34m"
+		brightCyan  = "\033[96m"
 		brightGreen = "\033[92m"
 	)
-	
+
 	// Status emoji and color
 	statusEmoji := "🟢"
 	statusColor := green
@@ -1411,32 +1472,34 @@ func (c *client) renderFrame(stats trafficStats, ping time.Duration) {
 		statusColor = yellow
 		statusText = "CONNECTING"
 	}
-	
+
 	pingText, bars := formatPingDisplay(ping)
 	pingColor := green
 	// Status line special case for emoji
 	// Status line special case for emoji
 	statusLine := func() string {
 		now := time.Now().Format("15:04:05")
-		return fmt.Sprintf(bold + brightCyan + "║" + reset + "  %s Status   : %s%s%s (%s)", statusEmoji, statusColor, bold, statusText, now)
+		return fmt.Sprintf(bold+brightCyan+"║"+reset+"  %s Status   : %s%s%s (%s)", statusEmoji, statusColor, bold, statusText, now)
 	}
-	
+
 	// Helper to create a row with an emoji label
 	makeRow := func(emoji, label, val, color string) string {
 		// "  emoji Label    : Value"
 		// Align colon at specific column?
 		// "  🔗 Local    : " -> 16 chars
-		
+
 		prefixVisible := 16
-		currentPrefix := 2 + 2 + 1 + len(label) + 2 
+		currentPrefix := 2 + 2 + 1 + len(label) + 2
 		padLabel := prefixVisible - currentPrefix
-		if padLabel < 0 { padLabel = 0 }
-		
+		if padLabel < 0 {
+			padLabel = 0
+		}
+
 		labelStr := label + strings.Repeat(" ", padLabel)
-		
-		return fmt.Sprintf(bold + brightCyan + "║" + reset + "  %s %s : %s%s%s", emoji, labelStr, color, val, reset)
+
+		return fmt.Sprintf(bold+brightCyan+"║"+reset+"  %s %s : %s%s%s", emoji, labelStr, color, val, reset)
 	}
-	
+
 	lines := []string{
 		bold + brightCyan + "╔══════════════════════════════════════════════════════",
 		bold + brightCyan + "║" + reset + bold + "      TrongDev | ProxVN - Tunnel Việt Nam Free",
@@ -1452,25 +1515,25 @@ func (c *client) renderFrame(stats trafficStats, ping time.Duration) {
 				}
 				displayHost = fmt.Sprintf("https://%s.%s", c.subdomain, domain)
 			}
-			return makeRow("🌐", "Public", displayHost, brightGreen + bold)
+			return makeRow("🌐", "Public", displayHost, brightGreen+bold)
 		}(),
 		makeRow("📡", "Protocol", strings.ToUpper(nonEmpty(c.protocol, "tcp")), magenta),
 		bold + brightCyan + "╠══════════════════════════════════════════════════════",
 		func() string {
 			v1 := fmt.Sprintf("⬆️  %s%s/s%s", green, stats.upRate, reset)
 			v2 := fmt.Sprintf("⬇️  %s%s/s%s", blue, stats.downRate, reset)
-			return fmt.Sprintf(bold + brightCyan + "║" + reset + "  📊 Traffic  : %s %s", v1, v2)
+			return fmt.Sprintf(bold+brightCyan+"║"+reset+"  📊 Traffic  : %s %s", v1, v2)
 		}(),
 		func() string {
-			return fmt.Sprintf(bold + brightCyan + "║" + reset + "  📈 Total    : %s%s%s ↑  %s%s%s ↓", cyan, stats.totalUp, reset, cyan, stats.totalDown, reset)
+			return fmt.Sprintf(bold+brightCyan+"║"+reset+"  📈 Total    : %s%s%s ↑  %s%s%s ↓", cyan, stats.totalUp, reset, cyan, stats.totalDown, reset)
 		}(),
 		func() string {
 			ac := strconv.Itoa(activeSessions)
 			to := strconv.FormatUint(totalSessions, 10)
-			return fmt.Sprintf(bold + brightCyan + "║" + reset + "  🔌 Sessions : active %s%s%s | total %s%s%s", yellow, ac, reset, cyan, to, reset)
+			return fmt.Sprintf(bold+brightCyan+"║"+reset+"  🔌 Sessions : active %s%s%s | total %s%s%s", yellow, ac, reset, cyan, to, reset)
 		}(),
 		func() string {
-			return fmt.Sprintf(bold + brightCyan + "║" + reset + "  🏓 Ping     : %s%s %s%s", pingColor, pingText, bars, reset)
+			return fmt.Sprintf(bold+brightCyan+"║"+reset+"  🏓 Ping     : %s%s %s%s", pingColor, pingText, bars, reset)
 		}(),
 		makeRow("🔐", "Key", nonEmpty(c.key, "(none)"), yellow),
 		makeRow("⚙️", "Version", tunnel.Version, magenta),
@@ -1481,19 +1544,19 @@ func (c *client) renderFrame(stats trafficStats, ping time.Duration) {
 
 	if c.uiEnabled {
 		var builder strings.Builder
-		
+
 		// Move cursor to top-left (Home)
 		builder.WriteString("\033[H")
-		
+
 		// Write all lines
 		for _, line := range lines {
 			builder.WriteString(line)
 			builder.WriteByte('\n')
 		}
-		
+
 		// Clear from cursor to end of screen (cleans up any partial leftovers from prev frame)
 		builder.WriteString("\033[J")
-		
+
 		// Print everything in one go to minimize tearing/scrolling artifacts
 		fmt.Print(builder.String())
 	}

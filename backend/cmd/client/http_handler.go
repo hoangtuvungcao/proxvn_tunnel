@@ -51,6 +51,10 @@ func (c *client) handleHTTPRequest(msg tunnel.Message) {
 	
 	// Forward to local HTTP server
 	// Skip SSL verification for local HTTPS targets (common for dev)
+	// This is ACCEPTABLE because:
+	// 1. Destination is localhost (not over network)
+	// 2. Often used with self-signed certs in development
+	// 3. No MITM risk since traffic doesn't leave the machine
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}

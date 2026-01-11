@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-setlocal EnableDelayedExpansion
+setlocal
 
-:: ===== COLOR THEME =====
+:: ===== THEME =====
 color 0A
-title ProxVN Launcher
+title ProxVN Tunnel Launcher
 
 :: ===== BANNER =====
 cls
@@ -20,48 +20,53 @@ echo            ProxVN Tunnel Launcher
 echo        --------------------------------
 echo.
 
+:: ===== CONFIG CỐ ĐỊNH =====
+set CERT_PIN=8ff1f269fa914ff6a6467ee7f9b8d7822408c67cbc6fd0c656532c9e68f3d071
+
 :: ===== INPUT =====
 set /p HOST=➤ Host   [127.0.0.1]: 
 if "%HOST%"=="" set HOST=127.0.0.1
 
 set /p PORT=➤ Port   [vd: 3389 / 80]: 
 if "%PORT%"=="" (
-  echo.
-  echo [✗] Port khong duoc de trong
-  timeout /t 2 >nul
-  exit
+    echo.
+    echo [✗] Port khong duoc de trong
+    timeout /t 2 >nul
+    exit
 )
 
-set /p PROTO=➤ Proto  [tcp / udp]: 
+
+set /p PROTO=➤ Proto  [tcp / udp /http]: 
 if "%PROTO%"=="" set PROTO=tcp
 
-:: ===== VALIDATE =====
+:: ===== VALIDATE PROTO =====
 if /I not "%PROTO%"=="tcp" if /I not "%PROTO%"=="udp" if /I not "%PROTO%"=="http" (
-  echo.
-  echo [✗] Proto khong hop le! Chi nhan tcp hoac udp
-  timeout /t 2 >nul
-  exit
+    echo.
+    echo [✗] Proto khong hop le! Chi nhan tcp hoac udp
+    timeout /t 2 >nul
+    exit
 )
 
 :: ===== SUMMARY =====
+cls
 echo.
 echo ========================================
-echo   ✓ Cấu hình tunnel
+echo   ✓ CẤU HÌNH PROXVN TUNNEL
 echo ----------------------------------------
-echo   Host  : %HOST%
-echo   Port  : %PORT%
-echo   Proto : %PROTO%
+echo   Host     : %HOST%
+echo   Port     : %PORT%
+echo   Protocol : %PROTO%
 echo ========================================
 echo.
 
-echo [→] Dang khoi chay ProxVN...
+echo [→] Dang khoi chay ProxVN Tunnel...
 timeout /t 1 >nul
 
 :: ===== RUN =====
-start "ProxVN Tunnel" cmd /k proxvn.exe --host %HOST% --port %PORT% --proto %PROTO%
+start "ProxVN Tunnel" cmd /k "proxvn.exe --host %HOST% --port %PORT% --proto %PROTO% --cert-pin %CERT_PIN%"
 
 echo.
-echo [✓] Da mo ProxVN o cua so rieng
-echo [i] Cua so launcher se tu dong dong
+echo [✓] ProxVN da chay o cua so rieng
+echo [i] Launcher se tu dong dong
 timeout /t 2 >nul
 exit

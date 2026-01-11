@@ -95,6 +95,7 @@ ssh user@103.77.246.111 -p 10000
 # Minecraft PE (UDP port 19132)
 proxvn --proto udp 19132
 ```
+✅ **An Toàn:** Từ phiên bản v4.0.0, ProxVN đã hỗ trợ **Mã hóa AES-GCM 256-bit** cho toàn bộ traffic UDP. Dữ liệu game/voice của bạn được bảo vệ an toàn khỏi việc nghe lén trên đường truyền Internet.
 
 Bạn bè connect vào: `103.77.246.111:10000`
 
@@ -312,7 +313,7 @@ Best practice:
 **Có!** Dùng Termux:
 ```bash
 # In Termux
-wget https://1b9b90.vutrungocrong.fun/downloads/proxvn-android
+wget https://ed5d08.vutrungocrong.fun/downloads/proxvn-android
 chmod +x proxvn-android
 ./proxvn-android --proto http 8080
 ```
@@ -320,7 +321,7 @@ chmod +x proxvn-android
 ### Có thể tunnel từ Raspberry Pi không?
 **Có!** Dùng Linux client:
 ```bash
-wget https://1b9b90.vutrungocrong.fun/downloads/proxvn-linux-client
+wget https://ed5d08.vutrungocrong.fun/downloads/proxvn-linux-client
 chmod +x proxvn-linux-client
 ./proxvn-linux-client --proto http 8123  # Home Assistant
 ```
